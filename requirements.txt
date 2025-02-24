@@ -1,0 +1,7 @@
+# Core Dependencies
+PyQt6==6.5.0  # For GUI (both server and client)
+
+# Optional (for development/testing)
+pyinstaller==5.13.0  # For building executables
+black==23.9.1        # Code formatting
+pytest==7.4.0        # Testing framework
