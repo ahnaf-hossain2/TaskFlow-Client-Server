@@ -6,7 +6,8 @@
 
 A robust task management system with a server-side admin panel and client applications. Features real-time updates, system tray integration, and desktop notifications.
 
-![Demo](screenshots/demo.gif) *(Replace with actual demo GIF)*
+![Demo](![python_tpqUHss2Av](https://github.com/user-attachments/assets/ffea7a7b-a68d-4d33-a0ef-c512cb21737e)
+)
 
 ## Features
 
