@@ -93,8 +93,12 @@ def handle_client(client_socket, client_address):
     try:
         client_id = client_socket.recv(1024).decode("utf-8")
         if client_id not in client_data:
+            # Send invalid ID message before closing
+            error_msg = json.dumps({"type": "invalid_id"})
+            client_socket.send(error_msg.encode("utf-8"))
             client_socket.close()
             return
+
 
         clients[client_id] = client_socket
         print(f"Client {client_id} connected from {client_address}")
@@ -597,19 +601,23 @@ class AdminPanel(QMainWindow):
 
 
     def delete_selected_notification(self):
-        """Deletes the selected notification from the list."""
         selected_row = self.notification_list.currentRow()
         if selected_row >= 0:
-            notification_id = int(self.notification_list.item(selected_row, 0).text())  # Get ID
-            confirm = QMessageBox.question(self, "Confirm Deletion", "Are you sure you want to delete this notification?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if confirm == QMessageBox.StandardButton.Yes:
-                # Find and remove the notification by ID
-                global notifications
-                notifications = [n for n in notifications if n["id"] != notification_id]
+            notification_id = int(self.notification_list.item(selected_row, 0).text())
+            # Find the notification to get client_id before deletion
+            notification_to_delete = next((n for n in notifications if n["id"] == notification_id), None)
+            if notification_to_delete:
+                client_id = notification_to_delete["client_id"]
+                notifications[:] = [n for n in notifications if n["id"] != notification_id]
                 save_data()
                 self.refresh_notification_list()
-        else:
-            QMessageBox.warning(self, "Error", "Please select a notification to delete.")
+
+                # Send delete command to relevant clients
+                if client_id == "ALL":
+                    for cid in clients:
+                        send_update_to_client(cid, "delete_notification", {"id": notification_id})
+                elif client_id in clients:
+                    send_update_to_client(client_id, "delete_notification", {"id": notification_id})
 
     def load_existing_data(self):
         load_data()

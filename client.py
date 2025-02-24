@@ -1,9 +1,9 @@
-import os
 import sys
 import json
 import socket
 import threading
 import time
+import os
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget,
     QListWidget, QPushButton, QLabel, QSystemTrayIcon, QMessageBox, QMenu, QListWidgetItem,
@@ -32,7 +32,6 @@ class ClientGUI(QMainWindow):
         self.setWindowTitle(f"Task Manager - {self.client_id if self.client_id else 'Not Logged In'}")
         self.setGeometry(300, 300, 400, 300)
 
-
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
@@ -42,15 +41,15 @@ class ClientGUI(QMainWindow):
         self.status_label = QLabel("Status: Disconnected")
         central_layout = QVBoxLayout()  # Layout for status label
         central_layout.addWidget(self.status_label)
-        central_layout.addWidget(self.tabs) # Add tabs to central layout
+        central_layout.addWidget(self.tabs)  # Add tabs to central layout
 
         central_widget = QWidget()
-        central_widget.setLayout(central_layout) # set central layout
+        central_widget.setLayout(central_layout)  # Set central layout
         self.setCentralWidget(central_widget)
 
         # --- Tray Icon Setup (Corrected Order) ---
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QIcon(r"C:\Users\User\Desktop\GitHub\task management final\icon.png"))
+        self.tray_icon.setIcon(QIcon("C:\\Users\\User\\Desktop\\GitHub\\TaskFlow-Client-Server\\icon.png"))  # Replace with the actual path to your icon
         self.tray_icon.setVisible(True)
 
         # Tray icon menu (NOW created *before* being assigned)
@@ -63,7 +62,6 @@ class ClientGUI(QMainWindow):
         self.tray_icon.activated.connect(self.tray_icon_activated)
         # --- End of Tray Icon Setup ---
 
-
         self.update_signal.connect(self.update_ui)
         self.notification_signal.connect(self.handle_notification)
 
@@ -71,9 +69,8 @@ class ClientGUI(QMainWindow):
         if not self.client_id:
             self.show_login_dialog()  # Show login only if no ID is saved
         else:
-             self.connect_thread = threading.Thread(target=self.connect_to_server, daemon=True)
-             self.connect_thread.start()
-
+            self.connect_thread = threading.Thread(target=self.connect_to_server, daemon=True)
+            self.connect_thread.start()
 
     def setup_task_tab(self):
         self.task_tab = QWidget()
@@ -86,7 +83,6 @@ class ClientGUI(QMainWindow):
         task_layout.addWidget(self.complete_button)
         self.tabs.addTab(self.task_tab, "Tasks")
 
-
     def setup_notification_tab(self):
         self.notification_tab = QWidget()
         notification_layout = QVBoxLayout(self.notification_tab)
@@ -94,7 +90,6 @@ class ClientGUI(QMainWindow):
         notification_layout.addWidget(QLabel("Notifications:"))
         notification_layout.addWidget(self.notification_list)
         self.tabs.addTab(self.notification_tab, "Notifications")
-
 
     def load_client_id(self):
         """Loads the client ID from the config file."""
@@ -128,18 +123,66 @@ class ClientGUI(QMainWindow):
                 sys.exit(0)  # Exit if the user cancels login
 
     def connect_to_server(self):
-        while not self.connected:  # Continuously try to connect
+        while not self.connected:
             try:
                 self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.client_socket.settimeout(5)  # Set timeout for connection attempt
                 self.client_socket.connect((self.server_host, self.server_port))
+                self.client_socket.settimeout(None)  # Remove timeout for normal operation
                 self.client_socket.send(self.client_id.encode("utf-8"))
+
+                # Wait for server response after sending ID
+                response = self.client_socket.recv(1024).decode("utf-8")
+                if not response:
+                    raise Exception("Connection closed by server")
+                data = json.loads(response)
+
+                if data.get("type") == "invalid_id":
+                    self.status_label.setText("Status: Invalid Client ID")
+                    self.client_socket.close()
+                    QMessageBox.warning(self, "Error", "Invalid Client ID. Please contact the administrator.")
+                    # Delete the client_config.json file
+                    if os.path.exists(CLIENT_CONFIG_FILE):
+                        os.remove(CLIENT_CONFIG_FILE)
+                    self.client_id = None
+                    self.show_login_dialog()  # Re-prompt for valid ID
+                    return
+                elif data.get("type") == "client_removed":
+                    self.status_label.setText("Status: Client Removed")
+                    self.client_socket.close()
+                    QMessageBox.warning(self, "Error", "Your client has been removed by the server.")
+                    # Delete the client_config.json file
+                    if os.path.exists(CLIENT_CONFIG_FILE):
+                        os.remove(CLIENT_CONFIG_FILE)
+                    self.client_id = None
+                    self.show_login_dialog()  # Re-prompt for valid ID
+                    return
+
                 self.connected = True
-                self.status_label.setText("Status: Connected")  # Update status
+                self.status_label.setText("Status: Connected")
                 # Start listening thread
                 self.listen_thread = threading.Thread(
                     target=self.listen_for_updates, daemon=True
                 )
                 self.listen_thread.start()
+
+            except socket.timeout:
+                self.status_label.setText("Status: Connection timeout")
+                QMessageBox.warning(self, "Connection Error", "Server is not responding. Please try again later.")
+                time.sleep(5)  # Wait before retrying
+
+            except ConnectionRefusedError:
+                self.status_label.setText("Status: Server not running")
+                result = QMessageBox.warning(
+                    self,
+                    "Server Offline",
+                    "The server is not running. Try again later?",
+                    QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Cancel
+                )
+                if result == QMessageBox.StandardButton.Cancel:
+                    sys.exit(0)
+                time.sleep(5)  # Wait before retrying
+
             except Exception as e:
                 print(f"Connection failed: {e}")
                 self.status_label.setText(f"Status: Disconnected. Retrying...")
@@ -148,17 +191,30 @@ class ClientGUI(QMainWindow):
     def listen_for_updates(self):
         while self.connected:
             try:
-                message = self.client_socket.recv(4096).decode(
-                    "utf-8"
-                )  # Increased buffer size
+                message = self.client_socket.recv(4096).decode("utf-8")
                 if not message:
-                    break  # Server disconnected
+                    break
                 data = json.loads(message)
-                # print(f"Received: {data}") # Debug received data.
 
-                if data["type"] == "initial_tasks":
-                    self.tasks = data["data"]
-                    self.update_signal.emit({"type": "tasks", "data": self.tasks})
+                # Add case for client removal
+                if data["type"] == "client_removed":
+                    self.connected = False
+                    self.status_label.setText("Status: Client Removed")
+                    QMessageBox.warning(self, "Removed", "Your client has been removed by the server.")
+                    # Delete the client_config.json file
+                    if os.path.exists(CLIENT_CONFIG_FILE):
+                        os.remove(CLIENT_CONFIG_FILE)
+                    self.client_id = None
+                    self.client_socket.close()
+                    self.show_login_dialog()
+                    break
+
+                # Add case for delete_notification
+                elif data["type"] == "delete_notification":
+                    notification_id = data["data"]["id"]
+                    self.notifications = [n for n in self.notifications if n["id"] != notification_id]
+                    self.update_signal.emit({"type": "notifications", "data": self.notifications})
+
                 elif data["type"] == "initial_notifications":
                     self.notifications = data["data"]
                     for notification in self.notifications:
@@ -223,7 +279,6 @@ class ClientGUI(QMainWindow):
                 item = QListWidgetItem(f"{notification['message']} (Status: {notification['status']})")
                 self.notification_list.addItem(item)
 
-
     def mark_task_completed(self):
         selected_item = self.task_list.currentItem()
         if selected_item:
@@ -262,7 +317,6 @@ class ClientGUI(QMainWindow):
 
         # Add to notification list
         self.update_ui({"type": "notifications", "data": self.notifications})
-
 
         # Mark notification as read (after displaying it!)
         try:
