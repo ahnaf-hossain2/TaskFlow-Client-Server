@@ -1,0 +1,581 @@
+import socket
+import threading
+import sqlite3
+import json
+import tkinter as tk
+from tkinter import ttk, messagebox
+import datetime
+from ttkthemes import ThemedTk
+
+class TaskServer:
+    def __init__(self, host='127.0.0.1', port=5555):
+        self.host = host
+        self.port = port
+        self.server_socket = None
+        self.clients = {}  # {client_id: (conn, addr, name)}
+        self.running = False
+        self.db_init()
+
+        # Placeholder for notification methods that will be overridden
+        self.notify_admin_client_connection = lambda client_id, ip, name: None
+        self.notify_admin_client_disconnection = lambda client_id: None
+        self.notify_admin_task_update = lambda client_id, task_id, status: None
+
+    def db_init(self):
+        """Initialize the database."""
+        conn = sqlite3.connect('taskmanager.db')
+        cursor = conn.cursor()
+
+        # Create clients table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS clients (
+            client_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            ip_address TEXT,
+            active INTEGER DEFAULT 1
+        )
+        ''')
+
+        # Create tasks table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT,
+            due_date TEXT,
+            client_id TEXT,
+            status TEXT DEFAULT 'Pending',
+            creation_date TEXT,
+            FOREIGN KEY (client_id) REFERENCES clients (client_id)
+        )
+        ''')
+
+        conn.commit()
+        conn.close()
+
+    def start_server(self):
+        """Start the server to listen for client connections."""
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            self.running = True
+
+            # Start accepting clients in a separate thread
+            accept_thread = threading.Thread(target=self.accept_clients)
+            accept_thread.daemon = True
+            accept_thread.start()
+
+            return accept_thread
+        except Exception as e:
+            messagebox.showerror("Server Error", f"Failed to start server: {str(e)}")
+            return None
+
+    def stop_server(self):
+        """Stop the server and close all connections."""
+        self.running = False
+
+        # Close all client connections
+        for client_id, (conn, _, _) in list(self.clients.items()):
+            try:
+                self.send_message(conn, {"type": "server_shutdown"})
+                conn.close()
+            except:
+                pass
+
+        # Close server socket
+        if self.server_socket:
+            self.server_socket.close()
+
+        self.clients = {}
+
+    def accept_clients(self):
+        """Accept incoming client connections."""
+        while self.running:
+            try:
+                conn, addr = self.server_socket.accept()
+                # Start a new thread to handle client communication
+                client_thread = threading.Thread(target=self.handle_client, args=(conn, addr))
+                client_thread.daemon = True
+                client_thread.start()
+            except:
+                if not self.running:
+                    break
+
+    def handle_client(self, conn, addr):
+        """Handle communication with a connected client."""
+        try:
+            # Receive login data
+            login_data = self.receive_message(conn)
+            if login_data and login_data.get('type') == 'login':
+                client_id = login_data.get('client_id')
+
+                # For this minimal version, we'll auto-register clients
+                if not self.validate_client(client_id):
+                    self.add_client(client_id, f"Client-{client_id}", addr[0])
+
+                # Get client name
+                client_name = self.get_client_name(client_id)
+
+                # Store client connection
+                self.clients[client_id] = (conn, addr, client_name)
+
+                # Send login success
+                self.send_message(conn, {
+                    "type": "login_response",
+                    "status": "success",
+                    "name": client_name
+                })
+
+                # Notify admin of client connection
+                self.notify_admin_client_connection(client_id, addr[0], client_name)
+
+                # Handle client messages
+                while self.running:
+                    data = self.receive_message(conn)
+                    if not data:
+                        break
+        except Exception as e:
+            print(f"Error handling client: {e}")
+        finally:
+            # Remove client from active clients
+            for cid, (client_conn, _, _) in list(self.clients.items()):
+                if client_conn == conn:
+                    del self.clients[cid]
+                    self.notify_admin_client_disconnection(cid)
+                    break
+
+            try:
+                conn.close()
+            except:
+                pass
+
+    def validate_client(self, client_id):
+        """Validate if client exists and is active."""
+        conn = sqlite3.connect('taskmanager.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''
+        SELECT active FROM clients WHERE client_id = ?
+        ''', (client_id,))
+
+        result = cursor.fetchone()
+        conn.close()
+
+        return result is not None and result[0] == 1
+
+    def get_client_name(self, client_id):
+        """Get client name from the database."""
+        conn = sqlite3.connect('taskmanager.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''
+        SELECT name FROM clients WHERE client_id = ?
+        ''', (client_id,))
+
+        result = cursor.fetchone()
+        conn.close()
+
+        return result[0] if result else "Unknown"
+
+    def add_client(self, client_id, name, ip_address=None):
+        """Add a new client to the database."""
+        conn = sqlite3.connect('taskmanager.db')
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute('''
+            INSERT INTO clients (client_id, name, ip_address, active)
+            VALUES (?, ?, ?, 1)
+            ''', (client_id, name, ip_address))
+
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def get_all_clients(self):
+        """Get all clients from the database."""
+        conn = sqlite3.connect('taskmanager.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''
+        SELECT client_id, name, ip_address, active
+        FROM clients
+        ORDER BY active DESC, name
+        ''')
+
+        clients = cursor.fetchall()
+        conn.close()
+
+        return clients
+
+    def send_message(self, conn, message):
+        """Send a message to a client."""
+        try:
+            message_json = json.dumps(message)
+            message_bytes = message_json.encode('utf-8')
+            length = len(message_bytes)
+            length_bytes = length.to_bytes(4, byteorder='big')
+            conn.sendall(length_bytes + message_bytes)
+            return True
+        except:
+            return False
+
+    def receive_message(self, conn):
+        """Receive a message from a client."""
+        try:
+            # Receive message length (4 bytes)
+            length_bytes = conn.recv(4)
+            if not length_bytes:
+                return None
+
+            length = int.from_bytes(length_bytes, byteorder='big')
+
+            # Receive data
+            data = b''
+            while len(data) < length:
+                packet = conn.recv(min(length - len(data), 4096))
+                if not packet:
+                    return None
+                data += packet
+
+            # Decode and parse
+            message_json = data.decode('utf-8')
+            message = json.loads(message_json)
+
+            return message
+        except:
+            return None
+
+class AdminGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Task Manager - Admin")
+        self.root.geometry("1000x600")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Initialize server
+        self.server = TaskServer()
+
+        # Override server notification methods
+        self.server.notify_admin_client_connection = self.handle_client_connection
+        self.server.notify_admin_client_disconnection = self.handle_client_disconnection
+        self.server.notify_admin_task_update = self.handle_task_update
+
+        # Create main frame
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Create tabs
+        self.dashboard_tab = ttk.Frame(self.notebook)
+        self.clients_tab = ttk.Frame(self.notebook)
+        self.tasks_tab = ttk.Frame(self.notebook)
+
+        self.notebook.add(self.dashboard_tab, text="Dashboard")
+        self.notebook.add(self.clients_tab, text="Clients")
+        self.notebook.add(self.tasks_tab, text="Tasks")
+
+        # Setup tabs
+        self.setup_dashboard_tab()
+        self.setup_clients_tab()
+        self.setup_tasks_tab()
+
+        # Status bar
+        self.status_frame = ttk.Frame(self.root)
+        self.status_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=5)
+
+        self.server_status_label = ttk.Label(self.status_frame, text="Server Status: Stopped")
+        self.server_status_label.pack(side=tk.LEFT)
+
+        self.connected_clients_label = ttk.Label(self.status_frame, text="Connected Clients: 0")
+        self.connected_clients_label.pack(side=tk.RIGHT)
+
+        # Server control frame
+        self.server_control_frame = ttk.Frame(self.root)
+        self.server_control_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=5)
+
+        self.start_server_btn = ttk.Button(self.server_control_frame, text="Start Server", command=self.start_server)
+        self.start_server_btn.pack(side=tk.LEFT, padx=5)
+
+        self.stop_server_btn = ttk.Button(self.server_control_frame, text="Stop Server", command=self.stop_server, state=tk.DISABLED)
+        self.stop_server_btn.pack(side=tk.LEFT, padx=5)
+
+        # Server info
+        host_label = ttk.Label(self.server_control_frame, text="Server IP:")
+        host_label.pack(side=tk.LEFT, padx=(20, 5))
+
+        self.host_var = tk.StringVar(value=self.server.host)
+        host_entry = ttk.Entry(self.server_control_frame, textvariable=self.host_var, width=15)
+        host_entry.pack(side=tk.LEFT)
+
+        port_label = ttk.Label(self.server_control_frame, text="Port:")
+        port_label.pack(side=tk.LEFT, padx=(10, 5))
+
+        self.port_var = tk.StringVar(value=str(self.server.port))
+        port_entry = ttk.Entry(self.server_control_frame, textvariable=self.port_var, width=6)
+        port_entry.pack(side=tk.LEFT)
+
+        # Server thread
+        self.server_thread = None
+
+        # Initialize activities log
+        self.add_activity_log("Application started")
+
+    def setup_dashboard_tab(self):
+        """Setup the dashboard tab with overview information."""
+        # Create frames
+        left_frame = ttk.Frame(self.dashboard_tab)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        right_frame = ttk.Frame(self.dashboard_tab)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Connected clients section
+        clients_frame = ttk.LabelFrame(left_frame, text="Connected Clients")
+        clients_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        columns = ("client_id", "name", "ip")
+        self.connected_clients_tree = ttk.Treeview(clients_frame, columns=columns, show="headings")
+        self.connected_clients_tree.heading("client_id", text="Client ID")
+        self.connected_clients_tree.heading("name", text="Name")
+        self.connected_clients_tree.heading("ip", text="IP Address")
+
+        self.connected_clients_tree.column("client_id", width=100)
+        self.connected_clients_tree.column("name", width=150)
+        self.connected_clients_tree.column("ip", width=150)
+
+        scrollbar = ttk.Scrollbar(clients_frame, orient=tk.VERTICAL, command=self.connected_clients_tree.yview)
+        self.connected_clients_tree.configure(yscroll=scrollbar.set)
+
+        self.connected_clients_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Recent activities section
+        activities_frame = ttk.LabelFrame(right_frame, text="Recent Activities")
+        activities_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.activities_text = tk.Text(activities_frame, wrap=tk.WORD, state=tk.DISABLED)
+        scroll = ttk.Scrollbar(activities_frame, command=self.activities_text.yview)
+        self.activities_text.configure(yscrollcommand=scroll.set)
+
+        self.activities_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Refresh button
+        ttk.Button(right_frame, text="Refresh Dashboard", command=self.refresh_dashboard).pack(pady=10)
+
+    def setup_clients_tab(self):
+        """Setup the clients tab for managing clients."""
+        # Create frames
+        left_frame = ttk.Frame(self.clients_tab)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        right_frame = ttk.Frame(self.clients_tab)
+        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
+
+        # Clients list
+        clients_frame = ttk.LabelFrame(left_frame, text="Clients")
+        clients_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        columns = ("client_id", "name", "ip", "status")
+        self.clients_tree = ttk.Treeview(clients_frame, columns=columns, show="headings")
+        self.clients_tree.heading("client_id", text="Client ID")
+        self.clients_tree.heading("name", text="Name")
+        self.clients_tree.heading("ip", text="IP Address")
+        self.clients_tree.heading("status", text="Status")
+
+        self.clients_tree.column("client_id", width=100)
+        self.clients_tree.column("name", width=150)
+        self.clients_tree.column("ip", width=150)
+        self.clients_tree.column("status", width=80)
+
+        scrollbar = ttk.Scrollbar(clients_frame, orient=tk.VERTICAL, command=self.clients_tree.yview)
+        self.clients_tree.configure(yscroll=scrollbar.set)
+
+        self.clients_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Client management
+        mgmt_frame = ttk.LabelFrame(right_frame, text="Client Management")
+        mgmt_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(mgmt_frame, text="Client ID:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.client_id_var = tk.StringVar()
+        ttk.Entry(mgmt_frame, textvariable=self.client_id_var, width=20).grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(mgmt_frame, text="Name:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.client_name_var = tk.StringVar()
+        ttk.Entry(mgmt_frame, textvariable=self.client_name_var, width=20).grid(row=1, column=1, padx=5, pady=5)
+
+        ttk.Label(mgmt_frame, text="IP Address:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        self.client_ip_var = tk.StringVar()
+        ttk.Entry(mgmt_frame, textvariable=self.client_ip_var, width=20).grid(row=2, column=1, padx=5, pady=5)
+
+        # Buttons
+        buttons_frame = ttk.Frame(right_frame)
+        buttons_frame.pack(fill=tk.X, padx=5, pady=10)
+
+        ttk.Button(buttons_frame, text="Add Client", command=self.add_client).pack(fill=tk.X, pady=2)
+        ttk.Button(buttons_frame, text="Update Client", command=self.update_client).pack(fill=tk.X, pady=2)
+        ttk.Button(buttons_frame, text="Refresh Clients", command=self.refresh_clients).pack(fill=tk.X, pady=2)
+
+        # Initial load of clients
+        self.refresh_clients()
+
+    def setup_tasks_tab(self):
+        """Setup the tasks tab for managing tasks."""
+        # Create main frame
+        frame = ttk.Frame(self.tasks_tab)
+        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Tasks list label
+        ttk.Label(frame, text="Task Management").pack(pady=10)
+
+        # This is a simplified version - in a real app you'd implement the task management UI
+
+    def add_activity_log(self, message):
+        """Add a message to the activities log."""
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_message = f"[{timestamp}] {message}\n"
+
+        self.activities_text.configure(state=tk.NORMAL)
+        self.activities_text.insert(tk.END, log_message)
+        self.activities_text.see(tk.END)
+        self.activities_text.configure(state=tk.DISABLED)
+
+    def handle_client_connection(self, client_id, ip, name):
+        """Handle client connection notification."""
+        self.add_activity_log(f"Client connected: {name} ({client_id}) from {ip}")
+        self.refresh_connected_clients()
+
+    def handle_client_disconnection(self, client_id):
+        """Handle client disconnection notification."""
+        self.add_activity_log(f"Client disconnected: {client_id}")
+        self.refresh_connected_clients()
+
+    def handle_task_update(self, client_id, task_id, status):
+        """Handle task update notification."""
+        client_name = self.server.get_client_name(client_id)
+        self.add_activity_log(f"Task {task_id} updated to '{status}' by {client_name}")
+
+    def refresh_dashboard(self):
+        """Refresh dashboard data."""
+        self.refresh_connected_clients()
+
+    def refresh_connected_clients(self):
+        """Refresh the connected clients list."""
+        # Clear tree
+        for item in self.connected_clients_tree.get_children():
+            self.connected_clients_tree.delete(item)
+
+        # Add connected clients
+        for client_id, (_, addr, name) in self.server.clients.items():
+            self.connected_clients_tree.insert("", tk.END, values=(client_id, name, addr[0]))
+
+        # Update connected clients count
+        self.connected_clients_label.config(text=f"Connected Clients: {len(self.server.clients)}")
+
+    def refresh_clients(self):
+        """Refresh clients list from database."""
+        # Clear tree
+        for item in self.clients_tree.get_children():
+            self.clients_tree.delete(item)
+
+        # Get all clients
+        clients = self.server.get_all_clients()
+
+        # Add to tree
+        for client in clients:
+            client_id, name, ip, active = client
+            status = "Active" if active else "Inactive"
+            self.clients_tree.insert("", tk.END, values=(client_id, name, ip, status))
+
+        # Setup selection handler
+        self.clients_tree.bind("<<TreeviewSelect>>", self.on_client_select)
+
+    def on_client_select(self, event):
+        """Handle selection in the clients tree."""
+        selected = self.clients_tree.selection()
+        if selected:
+            # Get values
+            values = self.clients_tree.item(selected[0], "values")
+
+            # Update entry fields
+            self.client_id_var.set(values[0])
+            self.client_name_var.set(values[1])
+            self.client_ip_var.set(values[2] if values[2] else "")
+
+    def add_client(self):
+        """Add a new client."""
+        client_id = self.client_id_var.get().strip()
+        name = self.client_name_var.get().strip()
+        ip = self.client_ip_var.get().strip()
+
+        if not client_id or not name:
+            messagebox.showerror("Input Error", "Client ID and Name are required")
+            return
+
+        # Add client
+        if self.server.add_client(client_id, name, ip):
+            messagebox.showinfo("Success", f"Client '{name}' added successfully")
+            self.add_activity_log(f"Added new client: {name} ({client_id})")
+            self.refresh_clients()
+            # Clear form
+            self.client_id_var.set("")
+            self.client_name_var.set("")
+            self.client_ip_var.set("")
+        else:
+            messagebox.showerror("Error", f"Client ID '{client_id}' already exists")
+
+    def update_client(self):
+        """Update an existing client."""
+        # In a full implementation, this would update the client info in the database
+        messagebox.showinfo("Info", "Client update functionality not implemented in this minimal version")
+
+    def start_server(self):
+        """Start the server."""
+        # Update server configuration
+        self.server.host = self.host_var.get()
+        try:
+            self.server.port = int(self.port_var.get())
+        except ValueError:
+            messagebox.showerror("Input Error", "Port must be a number")
+            return
+
+        # Start server
+        self.server_thread = self.server.start_server()
+        if self.server_thread:
+            self.server_status_label.config(text="Server Status: Running")
+            self.start_server_btn.config(state=tk.DISABLED)
+            self.stop_server_btn.config(state=tk.NORMAL)
+            self.add_activity_log(f"Server started on {self.server.host}:{self.server.port}")
+
+    def stop_server(self):
+        """Stop the server."""
+        self.server.stop_server()
+        self.server_status_label.config(text="Server Status: Stopped")
+        self.start_server_btn.config(state=tk.NORMAL)
+        self.stop_server_btn.config(state=tk.DISABLED)
+        self.add_activity_log("Server stopped")
+        self.refresh_connected_clients()
+
+    def on_close(self):
+        """Handle window close event."""
+        if messagebox.askokcancel("Quit", "Do you want to quit?"):
+            if self.server.running:
+                self.server.stop_server()
+            self.root.destroy()
+
+# Main entry point
+if __name__ == "__main__":
+    root = ThemedTk(theme="arc")  # You can choose another theme or use tk.Tk() if ttkthemes not available
+    app = AdminGUI(root)
+    root.mainloop()
