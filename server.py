@@ -89,6 +89,7 @@ def remove_client_connection(client_id):
         print(f"Client {client_id} disconnected.")
 
 def handle_client(client_socket, client_address):
+    """Handles communication with a connected client."""
     global next_notification_id
     try:
         client_id = client_socket.recv(1024).decode("utf-8")
@@ -98,6 +99,17 @@ def handle_client(client_socket, client_address):
             client_socket.send(error_msg.encode("utf-8"))
             client_socket.close()
             return
+
+        clients[client_id] = client_socket
+        print(f"Client {client_id} connected from {client_address}")
+
+        # Send initial tasks and unread notifications
+        client_tasks = tasks.get(client_id, [])
+        print(f"Sending tasks to {client_id}: {client_tasks}")  # ✅ Debugging line
+        send_update_to_client(client_id, "initial_tasks", client_tasks)
+
+        unread_notifications = [n for n in notifications if n["client_id"] in (client_id, "ALL") and n["status"] == "unread"]
+        send_update_to_client(client_id, "initial_notifications", unread_notifications)
 
 
         clients[client_id] = client_socket

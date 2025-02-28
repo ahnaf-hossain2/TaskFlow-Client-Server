@@ -208,6 +208,11 @@ class ClientGUI(QMainWindow):
                     self.notifications = data["data"]
                     for notification in self.notifications:
                         self.notification_signal.emit(notification)
+
+                elif data["type"] == "initial_tasks":  # ✅ FIX: Load tasks when client starts
+                    self.tasks = data["data"]  # Store the tasks received from the server
+                    self.update_signal.emit({"type": "tasks", "data": self.tasks})
+
                 elif data["type"] == "new_task":
                     self.tasks.append(data["data"])
                     self.update_signal.emit({"type": "tasks", "data": self.tasks})
@@ -217,6 +222,7 @@ class ClientGUI(QMainWindow):
                         QSystemTrayIcon.MessageIcon.Information,
                         5000
                     )
+
                 elif data["type"] == "task_update_admin":
                     for i, task in enumerate(self.tasks):
                         if i == data["data"]["task_id"]:
@@ -227,11 +233,13 @@ class ClientGUI(QMainWindow):
                             }
                             break
                     self.update_signal.emit({"type": "tasks", "data": self.tasks})
+
                 elif data["type"] == "delete_task":
                     task_id_to_delete = data["data"]["task_id"]
                     if 0 <= task_id_to_delete < len(self.tasks):
                         del self.tasks[task_id_to_delete]
                         self.update_signal.emit({"type": "tasks", "data": self.tasks})
+
                 elif data["type"] == "new_notification":
                     self.notifications.append(data["data"])
                     self.notification_signal.emit(data["data"])
@@ -246,6 +254,7 @@ class ClientGUI(QMainWindow):
             except Exception as e:
                 print(f"An unexpected error occurred: {e}")
                 break
+
 
     def update_ui(self, update_data):
         if update_data["type"] == "tasks":
